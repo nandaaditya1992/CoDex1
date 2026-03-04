@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF Image Extractor</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #f4f6fb;
+      color: #1f2937;
+    }
+
+    .app {
+      width: min(680px, 92vw);
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.12);
+      padding: 28px;
+    }
+
+    h1 {
+      margin-top: 0;
+      font-size: 1.4rem;
+    }
+
+    .row {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    button {
+      border: none;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-weight: 700;
+      cursor: pointer;
+      background: #2563eb;
+      color: white;
+    }
+
+    button.secondary {
+      background: #374151;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
+    input[type="file"] {
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+    }
+
+    .status {
+      margin-top: 14px;
+      border-radius: 8px;
+      padding: 10px;
+      background: #eef2ff;
+      min-height: 24px;
+      white-space: pre-wrap;
+      line-height: 1.4;
+      font-size: 0.95rem;
+    }
+
+    .hint {
+      font-size: 0.88rem;
+      color: #4b5563;
+      margin-top: 2px;
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <h1>PDF Image Extractor</h1>
+    <p>Select a PDF, then extract images to a destination folder. File names use:
+      <strong>pdfFileName_1.png</strong>, <strong>pdfFileName_2.png</strong>, etc.</p>
+
+    <div class="row">
+      <label for="pdfInput"><strong>1) Upload PDF</strong></label>
+      <input id="pdfInput" type="file" accept="application/pdf" />
+      <div class="hint">This app renders each page as a PNG image and saves all pages.</div>
+    </div>
+
+    <div class="row">
+      <strong>2) Destination Folder</strong>
+      <div class="controls" style="margin-top:0;">
+        <button id="pickFolderBtn" class="secondary">Choose Destination Folder</button>
+        <span id="folderLabel" class="hint">No folder selected yet.</span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="extractBtn" disabled>Extract Images</button>
+    </div>
+
+    <div id="status" class="status">Waiting for PDF selection.</div>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.min.mjs" type="module"></script>
+  <script type="module">
+    import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.min.mjs";
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.worker.min.mjs";
+
+    const pdfInput = document.getElementById("pdfInput");
+    const pickFolderBtn = document.getElementById("pickFolderBtn");
+    const extractBtn = document.getElementById("extractBtn");
+    const statusEl = document.getElementById("status");
+    const folderLabel = document.getElementById("folderLabel");
+
+    let destinationHandle = null;
+
+    function setStatus(message) {
+      statusEl.textContent = message;
+    }
+
+    function updateExtractButton() {
+      extractBtn.disabled = !pdfInput.files.length;
+    }
+
+    function sanitizeBaseName(fileName) {
+      return fileName
+        .replace(/\.[^/.]+$/, "")
+        .replace(/[^a-zA-Z0-9-_]/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_|_$/g, "") || "pdf";
+    }
+
+    async function pickDestinationFolder() {
+      if (!window.showDirectoryPicker) {
+        setStatus("Folder selection is not supported in this browser. Extract will download files instead.");
+        return;
+      }
+
+      try {
+        destinationHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+        folderLabel.textContent = `Selected: ${destinationHandle.name}`;
+        setStatus("Destination folder selected.");
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setStatus(`Failed to select folder: ${error.message}`);
+        }
+      }
+    }
+
+    async function saveBlobToFolder(blob, fileName) {
+      if (!destinationHandle) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName;
+        a.click();
+        URL.revokeObjectURL(url);
+        return;
+      }
+
+      const fileHandle = await destinationHandle.getFileHandle(fileName, { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+    }
+
+    async function renderPageToBlob(page) {
+      const viewport = page.getViewport({ scale: 2 });
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      await page.render({ canvasContext: context, viewport }).promise;
+
+      return await new Promise((resolve) => {
+        canvas.toBlob((blob) => resolve(blob), "image/png");
+      });
+    }
+
+    async function extractImages() {
+      const file = pdfInput.files[0];
+      if (!file) {
+        setStatus("Please upload a PDF first.");
+        return;
+      }
+
+      extractBtn.disabled = true;
+      const baseName = sanitizeBaseName(file.name);
+
+      try {
+        setStatus("Reading PDF...");
+        const buffer = await file.arrayBuffer();
+        const loadingTask = pdfjsLib.getDocument({ data: buffer });
+        const pdf = await loadingTask.promise;
+
+        setStatus(`Processing ${pdf.numPages} page(s)...`);
+
+        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+          const page = await pdf.getPage(pageNumber);
+          const blob = await renderPageToBlob(page);
+
+          if (!blob) {
+            throw new Error(`Unable to render page ${pageNumber}.`);
+          }
+
+          const suffix = pdf.numPages > 1 ? `_${pageNumber}` : "";
+          const outputName = `${baseName}${suffix}.png`;
+          await saveBlobToFolder(blob, outputName);
+          setStatus(`Saved: ${outputName} (${pageNumber}/${pdf.numPages})`);
+        }
+
+        setStatus(`Done. Extracted ${pdf.numPages} image(s).`);
+      } catch (error) {
+        console.error(error);
+        setStatus(`Extraction failed: ${error.message}`);
+      } finally {
+        updateExtractButton();
+      }
+    }
+
+    pdfInput.addEventListener("change", () => {
+      updateExtractButton();
+      if (pdfInput.files.length) {
+        setStatus(`Loaded: ${pdfInput.files[0].name}`);
+      } else {
+        setStatus("Waiting for PDF selection.");
+      }
+    });
+
+    pickFolderBtn.addEventListener("click", pickDestinationFolder);
+    extractBtn.addEventListener("click", extractImages);
+  </script>
+</body>
+</html>
